@@ -120,8 +120,11 @@ public class DistributedLockManager {
      * re-acquired by another holder, the other holder's lock is left intact.
      *
      * @param lock The lock which is acquired
-     * @return true if the lock is successfully released; false if this instance did not hold it, or if it had
-     * already expired (and possibly been re-acquired by another holder) before release
+     * @return true if this instance's lock record was removed; false if this instance did not hold the lock, or if
+     * the lock is no longer this instance's (it expired and was re-acquired by another holder, or its record is
+     * already gone). Note that a lock which expired but was not re-acquired may still be released with true on stores
+     * that physically retain expired records until a later sweep (e.g. Aerospike); this is harmless, as only this
+     * instance's own stale record is removed.
      */
     public boolean releaseLock(final Lock lock) {
         return lockBase.releaseLock(lock);

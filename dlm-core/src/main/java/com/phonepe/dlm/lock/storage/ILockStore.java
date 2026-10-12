@@ -92,7 +92,8 @@ public interface ILockStore {
      * @param farmId     the farm (data centre) of the caller
      * @param acquiredAt the value passed to {@link #write(String, LockLevel, String, Duration, long)} on acquisition
      * @return {@code true} if the caller's lock record was removed; {@code false} if it no longer exists or belongs to
-     * another holder
+     * another holder. A store that retains expired records until a later sweep may return {@code true} for the
+     * caller's own expired, not-yet-swept record; it must never remove a record carrying a different stamp.
      */
     default boolean remove(String lockId, LockLevel lockLevel, String farmId, long acquiredAt) {
         remove(lockId, lockLevel, farmId);

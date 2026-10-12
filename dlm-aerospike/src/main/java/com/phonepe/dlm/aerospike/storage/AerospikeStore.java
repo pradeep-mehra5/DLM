@@ -111,8 +111,13 @@ public class AerospikeStore implements ILockStore {
      * Deletes the lock record only if its {@code <farm>##uat} bin still equals {@code acquiredAt}, using a server-side
      * filter expression (Aerospike server 5.2+), so the check and the delete are atomic.
      *
-     * @return {@code true} if this holder's record was deleted; {@code false} if the record no longer exists (expired)
-     * or now belongs to another holder (filtered out). Neither of these is retried.
+     * Aerospike hides an expired record from reads immediately but keeps it until the namespace's expiry sweep
+     * ({@code nsup-period}). Until then, a holder whose lock expired and was not re-acquired still matches its own
+     * stamp, so its release deletes that stale record and returns {@code true}. A record re-created by another holder
+     * carries a different stamp and is never deleted.
+     *
+     * @return {@code true} if this holder's record (live, or expired but not yet swept) was deleted; {@code false} if
+     * the record is gone or now belongs to another holder (filtered out). Neither of these is retried.
      */
     @Override
     public boolean remove(String lockId, LockLevel lockLevel, String farmId, long acquiredAt) {

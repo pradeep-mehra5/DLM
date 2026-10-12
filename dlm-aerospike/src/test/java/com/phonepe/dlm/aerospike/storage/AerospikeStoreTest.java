@@ -104,7 +104,7 @@ class AerospikeStoreTest {
     }
 
     @Test
-    void ownerCheckedRemoveReturnsFalseWhenLockAlreadyExpired() {
+    void ownerCheckedRemoveReturnsFalseWhenRecordNotFound() {
         when(client.getWritePolicyDefault()).thenReturn(new WritePolicy());
         when(client.delete(any(WritePolicy.class), any(Key.class))).thenReturn(false);
 

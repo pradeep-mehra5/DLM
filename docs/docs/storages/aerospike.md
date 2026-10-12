@@ -98,8 +98,15 @@ aerospikeClient.delete(deletePolicy, key);
 | Outcome | `remove` returns |
 |---------|------------------|
 | Record carries this holder's `acquiredAt` → deleted | `true` |
-| Record expired (not found) | `false` |
+| Record expired but not yet removed by the expiry sweep (`nsup-period`), still carrying this holder's `acquiredAt` → deleted | `true` |
+| Record not found (released, or already swept) | `false` |
 | Record belongs to another holder (`FILTERED_OUT`) | `false` (not retried) |
+
+!!! note
+    Aerospike hides an expired record from reads immediately but keeps it until the namespace's expiry sweep. A
+    holder whose lock expired and was **not** re-acquired therefore still matches its own stamp, and its release
+    returns `true` (removing only its own stale record). This does not affect safety: a record re-created by another
+    holder carries a different stamp and is never deleted.
 
 Because the check and the delete are a single server-side operation, a holder whose lock expired can never delete a
 lock that another holder acquired afterwards. For `XDC` locks, a record created from another farm has no
