@@ -19,19 +19,29 @@ package com.phonepe.dlm.hbase.storage;
 import com.phonepe.dlm.exception.DLMException;
 import com.phonepe.dlm.exception.ErrorCode;
 import com.phonepe.dlm.lock.level.LockLevel;
+import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.Delete;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -107,5 +117,59 @@ class HBaseStoreTest {
         store.remove(LOCK_ID, LockLevel.DC, FARM_ID);
 
         assertTrue(connection.getTable(TABLE).getData().isEmpty());
+    }
+
+    @Test
+    void writeStampsCellTimestampWithAcquisitionTime() throws IOException {
+        final Table.CheckAndMutateBuilder builder = selfReturningBuilder();
+        when(builder.thenPut(any(Put.class))).thenReturn(true);
+
+        storeWith(builder).write(LOCK_ID, LockLevel.DC, FARM_ID, TTL, ACQUIRED_AT);
+
+        final ArgumentCaptor<Put> put = ArgumentCaptor.forClass(Put.class);
+        verify(builder).thenPut(put.capture());
+        final Cell cell = put.getValue().getFamilyCellMap().get(Bytes.toBytes("D")).get(0);
+        assertEquals(ACQUIRED_AT, cell.getTimestamp());
+        assertArrayEquals(Bytes.toBytes(ACQUIRED_AT), CellUtil.cloneValue(cell));
+    }
+
+    /**
+     * The owner-checked release must delete only the cell version written at {@code acquiredAt}. A whole-row delete
+     * leaves a tombstone with the region server's clock that hides the next holder's (client-clock stamped) cell when
+     * the lock is re-acquired within the clock skew, breaking mutual exclusion.
+     */
+    @Test
+    void ownerCheckedRemoveDeletesOnlyTheHoldersCellVersion() throws IOException {
+        final Table.CheckAndMutateBuilder builder = selfReturningBuilder();
+        when(builder.thenDelete(any(Delete.class))).thenReturn(true);
+
+        assertTrue(storeWith(builder).remove(LOCK_ID, LockLevel.DC, FARM_ID, ACQUIRED_AT));
+
+        verify(builder).ifEquals(Bytes.toBytes(ACQUIRED_AT));
+        final ArgumentCaptor<Delete> delete = ArgumentCaptor.forClass(Delete.class);
+        verify(builder).thenDelete(delete.capture());
+        final List<Cell> markers = delete.getValue().getFamilyCellMap().get(Bytes.toBytes("D"));
+        assertEquals(1, markers.size());
+        final Cell marker = markers.get(0);
+        assertArrayEquals(Bytes.toBytes("L"), CellUtil.cloneQualifier(marker));
+        assertEquals(ACQUIRED_AT, marker.getTimestamp());
+        // Version delete (Cell.Type.Delete), not a column/family/row tombstone that would also hide newer cells.
+        assertEquals(Cell.Type.Delete, marker.getType());
+    }
+
+    private static Table.CheckAndMutateBuilder selfReturningBuilder() {
+        final Table.CheckAndMutateBuilder builder = mock(Table.CheckAndMutateBuilder.class);
+        when(builder.qualifier(any())).thenReturn(builder);
+        when(builder.ifNotExists()).thenReturn(builder);
+        when(builder.ifEquals(any())).thenReturn(builder);
+        return builder;
+    }
+
+    private HBaseStore storeWith(final Table.CheckAndMutateBuilder builder) throws IOException {
+        final Table table = mock(Table.class);
+        when(table.checkAndMutate(any(byte[].class), any(byte[].class))).thenReturn(builder);
+        final Connection mockedConnection = mock(Connection.class);
+        when(mockedConnection.getTable(any(TableName.class))).thenReturn(table);
+        return HBaseStore.builder().connection(mockedConnection).tableName(TABLE).build();
     }
 }

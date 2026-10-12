@@ -79,8 +79,9 @@ public class HBaseStore implements ILockStore {
     }
 
     /**
-     * Creates the lock cell (only if absent) with {@code acquiredAt} as its value, which
-     * {@link #remove(String, LockLevel, String, long)} uses to verify ownership.
+     * Creates the lock cell (only if absent) with {@code acquiredAt} as both its value and its cell timestamp.
+     * The value is what {@link #remove(String, LockLevel, String, long)} checks for ownership; the timestamp lets that
+     * release delete exactly this cell version (see there).
      */
     @Override
     public void write(String lockId, LockLevel lockLevel, String farmId, Duration ttlSeconds, long acquiredAt) {
@@ -90,7 +91,7 @@ public class HBaseStore implements ILockStore {
             final boolean result = table.checkAndMutate(normalisedRowKey, COLUMN_FAMILY)
                     .qualifier(COLUMN_NAME)
                     .ifNotExists()
-                    .thenPut(new Put(normalisedRowKey, System.currentTimeMillis()).setTTL(ttlSeconds.getSeconds() * 1_000L)
+                    .thenPut(new Put(normalisedRowKey, acquiredAt).setTTL(ttlSeconds.getSeconds() * 1_000L)
                             .addColumn(COLUMN_FAMILY, COLUMN_NAME, Bytes.toBytes(acquiredAt)));
             if (!result) {
                 throw DLMException.builder()
@@ -124,7 +125,13 @@ public class HBaseStore implements ILockStore {
     }
 
     /**
-     * Atomically deletes the lock row only if its cell still holds {@code acquiredAt}.
+     * Atomically deletes this holder's lock cell, only if the cell still holds {@code acquiredAt}.
+     * <p>
+     * The delete targets the single cell version written at {@code acquiredAt} rather than the whole row. A whole-row
+     * delete leaves a tombstone stamped with the region server's clock, which hides any cell with an older timestamp;
+     * since lock cells are stamped with the client's clock, a lock re-acquired shortly after a release (within the
+     * client/server clock skew) would be written but invisible, letting a second holder acquire it too. A
+     * version-specific delete hides only this holder's cell, so the next holder's cell is always visible.
      *
      * @return {@code true} if this holder's lock was deleted; {@code false} if it no longer exists (expired) or now
      * belongs to another holder
@@ -136,7 +143,7 @@ public class HBaseStore implements ILockStore {
             return table.checkAndMutate(normalisedRowKey, COLUMN_FAMILY)
                     .qualifier(COLUMN_NAME)
                     .ifEquals(Bytes.toBytes(acquiredAt))
-                    .thenDelete(new Delete(normalisedRowKey));
+                    .thenDelete(new Delete(normalisedRowKey).addColumn(COLUMN_FAMILY, COLUMN_NAME, acquiredAt));
         } catch (IOException e) {
             throw DLMException.propagate(e);
         }

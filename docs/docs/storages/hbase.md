@@ -69,7 +69,7 @@ flowchart LR
 The lock TTL is set as the cell-level TTL on the `Put`:
 
 ```java
-new Put(rowKey, System.currentTimeMillis())
+new Put(rowKey, acquiredAt)          // cell timestamp = acquisition time
     .setTTL(ttlSeconds * 1_000L)  // milliseconds
     .addColumn(COLUMN_FAMILY, COLUMN_NAME, Bytes.toBytes(acquiredAt));
 ```
@@ -110,12 +110,18 @@ Release is ownership-checked with an atomic `checkAndMutate`:
 table.checkAndMutate(rowKey, COLUMN_FAMILY)
     .qualifier(COLUMN_NAME)
     .ifEquals(Bytes.toBytes(acquiredAt))
-    .thenDelete(new Delete(rowKey));
+    .thenDelete(new Delete(rowKey).addColumn(COLUMN_FAMILY, COLUMN_NAME, acquiredAt));
 ```
 
-The row is deleted (immediately, without waiting for TTL expiry) only if the cell still holds this holder's
+The lock cell is deleted (immediately, without waiting for TTL expiry) only if it still holds this holder's
 acquisition timestamp. If the lock expired, or expired and was re-acquired by another holder, nothing is deleted and
 `remove` returns `false`.
+
+The delete targets only the cell **version** written at `acquiredAt`, not the whole row. A whole-row delete leaves a
+tombstone stamped with the region server's clock, which hides every cell with an older timestamp. Lock cells are
+stamped with the client's clock, so if the client runs behind the server, a lock re-acquired within that skew after a
+release would be written but invisible - and a second holder could then acquire it too. A version-specific delete
+hides only the released cell, so the next holder's cell is always visible.
 
 ## Cleanup
 
