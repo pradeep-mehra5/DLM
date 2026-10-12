@@ -83,7 +83,27 @@ Each lock record contains two bins:
 | Bin name | Format | Content |
 |----------|--------|---------|
 | `<farmId>##data` | Integer | `1` (marker) |
-| `<farmId>##uat`  | Long    | Timestamp of lock acquisition (`System.currentTimeMillis()`) |
+| `<farmId>##uat`  | Long    | Timestamp of lock acquisition (epoch millis); also the ownership stamp checked on release |
+
+## Release
+
+Release is ownership-checked using a server-side **filter expression** (requires Aerospike server 5.2+):
+
+```java
+deletePolicy.filterExp = Exp.build(Exp.eq(Exp.intBin("<farmId>##uat"), Exp.val(acquiredAt)));
+deletePolicy.failOnFilteredOut = true;
+aerospikeClient.delete(deletePolicy, key);
+```
+
+| Outcome | `remove` returns |
+|---------|------------------|
+| Record carries this holder's `acquiredAt` → deleted | `true` |
+| Record expired (not found) | `false` |
+| Record belongs to another holder (`FILTERED_OUT`) | `false` (not retried) |
+
+Because the check and the delete are a single server-side operation, a holder whose lock expired can never delete a
+lock that another holder acquired afterwards. For `XDC` locks, a record created from another farm has no
+`<farmId>##uat` bin for this farm, so it is filtered out as well.
 
 ## Initialization
 

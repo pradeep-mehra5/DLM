@@ -71,7 +71,7 @@ The lock TTL is set as the cell-level TTL on the `Put`:
 ```java
 new Put(rowKey, System.currentTimeMillis())
     .setTTL(ttlSeconds * 1_000L)  // milliseconds
-    .addColumn(COLUMN_FAMILY, COLUMN_NAME, COLUMN_DATA);
+    .addColumn(COLUMN_FAMILY, COLUMN_NAME, Bytes.toBytes(acquiredAt));
 ```
 
 After the TTL expires, HBase automatically removes the cell, making the lock available for re-acquisition.
@@ -98,13 +98,24 @@ The logical key varies by lock level:
 
 | Column Family | Qualifier | Value |
 |---------------|-----------|-------|
-| `D`           | `L`       | `M` (marker byte) |
+| `D`           | `L`       | Acquisition timestamp (epoch millis, 8-byte long); the ownership stamp checked on release |
 
 A single column family (`D`) with GZ compression and `maxVersions=1` keeps the storage footprint minimal.
 
 ## Release
 
-`HBaseStore.remove()` issues a `Delete` on the row key. This removes the lock record immediately, without waiting for TTL expiry.
+Release is ownership-checked with an atomic `checkAndMutate`:
+
+```java
+table.checkAndMutate(rowKey, COLUMN_FAMILY)
+    .qualifier(COLUMN_NAME)
+    .ifEquals(Bytes.toBytes(acquiredAt))
+    .thenDelete(new Delete(rowKey));
+```
+
+The row is deleted (immediately, without waiting for TTL expiry) only if the cell still holds this holder's
+acquisition timestamp. If the lock expired, or expired and was re-acquired by another holder, nothing is deleted and
+`remove` returns `false`.
 
 ## Cleanup
 

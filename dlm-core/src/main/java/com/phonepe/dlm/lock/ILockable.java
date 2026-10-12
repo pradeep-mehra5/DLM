@@ -93,8 +93,13 @@ public interface ILockable {
     /**
      * This method releases the acquired lock, allowing other threads to acquire it.
      *
+     * <p>
+     * Release only removes the lock if it is still held by this lock instance. If the lock outlived its TTL and was
+     * re-acquired by another holder, the other holder's lock is left intact.
+     *
      * @param lock The lock which is acquired
-     * @return true if the lock is successfully released, otherwise false
+     * @return true if the lock is successfully released; false if this instance did not hold it, or if it had
+     * already expired (and possibly been re-acquired by another holder) before release
      */
     boolean releaseLock(final Lock lock);
 }

@@ -133,18 +133,34 @@ public class LockBase implements ILockable {
         } while (!success.get());
     }
 
+    /**
+     * {@inheritDoc}
+     * <p>
+     * Release is ownership-checked: the lock record is removed only if it still carries this instance's acquisition
+     * timestamp. If the lock outlived its TTL and was re-acquired by another holder, that holder's lock is left intact
+     * and {@code false} is returned (and logged), signalling that this holder was not protected for its whole
+     * critical section. The guarantee assumes a TTL of at least one second.
+     */
     @Override
     public boolean releaseLock(final Lock lock) {
         if (lock.getAcquiredStatus().get()) {
-            lockStore.remove(lock.getLockId(), lock.getLockLevel(), lock.getFarmId());
+            final long acquiredAt = lock.getAcquiredAt().get();
+            final boolean removed = lockStore.remove(lock.getLockId(), lock.getLockLevel(), lock.getFarmId(), acquiredAt);
             lock.getAcquiredStatus().compareAndSet(true, false);
-            return !lock.getAcquiredStatus().get();
+            if (!removed) {
+                log.warn("Lock [id = {}] was no longer held by this instance at release (held for {} ms); it expired "
+                                + "and may have been re-acquired by another holder",
+                        lock.getLockId(), System.currentTimeMillis() - acquiredAt);
+            }
+            return removed;
         }
         return false;
     }
 
     private void writeToStore(final Lock lock, final Duration ttlSeconds) {
-        lockStore.write(lock.getLockId(), lock.getLockLevel(), lock.getFarmId(), ttlSeconds);
+        final long acquiredAt = System.currentTimeMillis();
+        lockStore.write(lock.getLockId(), lock.getLockLevel(), lock.getFarmId(), ttlSeconds, acquiredAt);
+        lock.getAcquiredAt().set(acquiredAt);
         lock.getAcquiredStatus().compareAndSet(false, true);
     }
 

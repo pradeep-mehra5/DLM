@@ -79,6 +79,20 @@ boolean released = lockManager.releaseLock(lock);
 |-------------|---------|
 | `true` | Lock was held by this instance and has been removed from the store. |
 | `false` | Lock was not held (`acquiredStatus` was already `false`). No store operation performed. |
+| `false` | Lock had **expired** before release (and may have been re-acquired by another holder). The other holder's lock is left intact, and a warning is logged. |
+
+Release is **ownership-checked**. On acquisition, the lock record is stamped with the acquisition time
+(epoch millis), which is also kept on the `Lock` instance (`lock.getAcquiredAt()`). On release, the record is
+removed only if it still carries that timestamp, as a single atomic operation in the store. This prevents a holder
+whose lock outlived its TTL from deleting the lock that another holder acquired afterwards.
+
+!!! warning
+    A `false` return after a successful acquisition means the lock expired while the work was still running, so the
+    critical section was not fully protected. Choose a TTL comfortably longer than the work it guards.
+
+!!! note
+    The ownership check relies on a successor's acquisition timestamp differing from the expired holder's, which
+    holds for TTLs of at least one second.
 
 ### `getLockInstance`
 

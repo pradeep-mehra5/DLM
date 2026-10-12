@@ -44,7 +44,6 @@ public class HBaseStore implements ILockStore {
             ONE_BYTE_HASHER);
     private static final byte[] COLUMN_FAMILY = Bytes.toBytes("D");
     private static final byte[] COLUMN_NAME = Bytes.toBytes("L");
-    private static final byte[] COLUMN_DATA = Bytes.toBytes("M");
     private Connection connection;
     private String tableName;
 
@@ -70,8 +69,21 @@ public class HBaseStore implements ILockStore {
         }
     }
 
+    /**
+     * @deprecated Use {@link #write(String, LockLevel, String, Duration, long)}.
+     */
+    @Deprecated
     @Override
     public void write(String lockId, LockLevel lockLevel, String farmId, Duration ttlSeconds) {
+        write(lockId, lockLevel, farmId, ttlSeconds, System.currentTimeMillis());
+    }
+
+    /**
+     * Creates the lock cell (only if absent) with {@code acquiredAt} as its value, which
+     * {@link #remove(String, LockLevel, String, long)} uses to verify ownership.
+     */
+    @Override
+    public void write(String lockId, LockLevel lockLevel, String farmId, Duration ttlSeconds, long acquiredAt) {
         final byte[] normalisedRowKey = getNormalisedRowKey(lockId, lockLevel, farmId);
 
         try (final Table table = getTable()) {
@@ -79,7 +91,7 @@ public class HBaseStore implements ILockStore {
                     .qualifier(COLUMN_NAME)
                     .ifNotExists()
                     .thenPut(new Put(normalisedRowKey, System.currentTimeMillis()).setTTL(ttlSeconds.getSeconds() * 1_000L)
-                            .addColumn(COLUMN_FAMILY, COLUMN_NAME, COLUMN_DATA));
+                            .addColumn(COLUMN_FAMILY, COLUMN_NAME, Bytes.toBytes(acquiredAt)));
             if (!result) {
                 throw DLMException.builder()
                         .errorCode(ErrorCode.LOCK_UNAVAILABLE)
@@ -97,10 +109,34 @@ public class HBaseStore implements ILockStore {
         }
     }
 
+    /**
+     * @deprecated Deletes the row unconditionally, which removes another holder's lock if this one had expired and
+     * been re-acquired. Use {@link #remove(String, LockLevel, String, long)}.
+     */
+    @Deprecated
     @Override
     public void remove(String lockId, LockLevel lockLevel, String farmId) {
         try (final Table table = getTable()) {
             table.delete(new Delete(getNormalisedRowKey(lockId, lockLevel, farmId)));
+        } catch (IOException e) {
+            throw DLMException.propagate(e);
+        }
+    }
+
+    /**
+     * Atomically deletes the lock row only if its cell still holds {@code acquiredAt}.
+     *
+     * @return {@code true} if this holder's lock was deleted; {@code false} if it no longer exists (expired) or now
+     * belongs to another holder
+     */
+    @Override
+    public boolean remove(String lockId, LockLevel lockLevel, String farmId, long acquiredAt) {
+        final byte[] normalisedRowKey = getNormalisedRowKey(lockId, lockLevel, farmId);
+        try (final Table table = getTable()) {
+            return table.checkAndMutate(normalisedRowKey, COLUMN_FAMILY)
+                    .qualifier(COLUMN_NAME)
+                    .ifEquals(Bytes.toBytes(acquiredAt))
+                    .thenDelete(new Delete(normalisedRowKey));
         } catch (IOException e) {
             throw DLMException.propagate(e);
         }

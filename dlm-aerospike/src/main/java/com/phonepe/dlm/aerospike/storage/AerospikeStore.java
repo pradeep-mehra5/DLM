@@ -17,6 +17,7 @@
 package com.phonepe.dlm.aerospike.storage;
 
 import com.aerospike.client.*;
+import com.aerospike.client.exp.Exp;
 import com.aerospike.client.policy.CommitLevel;
 import com.aerospike.client.policy.GenerationPolicy;
 import com.aerospike.client.policy.WritePolicy;
@@ -33,6 +34,7 @@ import lombok.Data;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Data
 @Builder
@@ -50,8 +52,21 @@ public class AerospikeStore implements ILockStore {
         // Nothing to initialise
     }
 
+    /**
+     * @deprecated Use {@link #write(String, LockLevel, String, Duration, long)}.
+     */
+    @Deprecated
     @Override
     public void write(String lockId, LockLevel lockLevel, String farmId, Duration ttlSeconds) {
+        write(lockId, lockLevel, farmId, ttlSeconds, System.currentTimeMillis());
+    }
+
+    /**
+     * Creates the lock record (create-only, via generation check) with {@code acquiredAt} stored in the
+     * {@code <farm>##uat} bin, which {@link #remove(String, LockLevel, String, long)} uses to verify ownership.
+     */
+    @Override
+    public void write(String lockId, LockLevel lockLevel, String farmId, Duration ttlSeconds, long acquiredAt) {
         try {
             final WritePolicy writePolicy = new WritePolicy(aerospikeClient.getWritePolicyDefault());
             writePolicy.generationPolicy = GenerationPolicy.EXPECT_GEN_EQUAL;
@@ -60,7 +75,7 @@ public class AerospikeStore implements ILockStore {
             writePolicy.commitLevel = CommitLevel.COMMIT_MASTER; // Committing to master only, as there is no read required so there is no chance of dirty reads.
             final List<Bin> binList = new ArrayList<>();
             binList.add(new Bin(AerospikeUtils.getBin(DATA_BIN, farmId), 1));
-            binList.add(new Bin(AerospikeUtils.getBin(MODIFIED_AT_BIN, farmId), System.currentTimeMillis()));
+            binList.add(new Bin(AerospikeUtils.getBin(MODIFIED_AT_BIN, farmId), acquiredAt));
 
             AerospikeUtils.retry(() -> write(lockId, lockLevel, farmId, writePolicy, binList));
         } catch (DLMException e) {
@@ -73,6 +88,11 @@ public class AerospikeStore implements ILockStore {
         }
     }
 
+    /**
+     * @deprecated Deletes the record unconditionally, which removes another holder's lock if this one had expired
+     * and been re-acquired. Use {@link #remove(String, LockLevel, String, long)}.
+     */
+    @Deprecated
     @Override
     public void remove(String lockId, LockLevel lockLevel, String farmId) {
         try {
@@ -81,11 +101,41 @@ public class AerospikeStore implements ILockStore {
                             new Key(namespace, getSetName(lockLevel, farmId), lockId))
             );
         } catch (AerospikeException e) {
-            throw DLMException.builder()
-                    .cause(e)
-                    .errorCode(ErrorCode.RETRIES_EXHAUSTED)
-                    .message(String.format("Error removing lock in aerospike [id = %s]", lockId))
-                    .build();
+            throw removalError(lockId, e);
+        } catch (RuntimeException e) {
+            throw connectionError(lockId, e);
+        }
+    }
+
+    /**
+     * Deletes the lock record only if its {@code <farm>##uat} bin still equals {@code acquiredAt}, using a server-side
+     * filter expression (Aerospike server 5.2+), so the check and the delete are atomic.
+     *
+     * @return {@code true} if this holder's record was deleted; {@code false} if the record no longer exists (expired)
+     * or now belongs to another holder (filtered out). Neither of these is retried.
+     */
+    @Override
+    public boolean remove(String lockId, LockLevel lockLevel, String farmId, long acquiredAt) {
+        final AtomicBoolean removed = new AtomicBoolean();
+        try {
+            final WritePolicy deletePolicy = new WritePolicy(aerospikeClient.getWritePolicyDefault());
+            deletePolicy.filterExp = Exp.build(
+                    Exp.eq(Exp.intBin(AerospikeUtils.getBin(MODIFIED_AT_BIN, farmId)), Exp.val(acquiredAt)));
+            deletePolicy.failOnFilteredOut = true;
+            AerospikeUtils.retry(() -> {
+                try {
+                    removed.set(aerospikeClient.delete(deletePolicy,
+                            new Key(namespace, getSetName(lockLevel, farmId), lockId)));
+                } catch (AerospikeException e) {
+                    if (e.getResultCode() != ResultCode.FILTERED_OUT) {
+                        throw e;
+                    }
+                    removed.set(false);
+                }
+            });
+            return removed.get();
+        } catch (AerospikeException e) {
+            throw removalError(lockId, e);
         } catch (RuntimeException e) {
             throw connectionError(lockId, e);
         }
@@ -112,6 +162,14 @@ public class AerospikeStore implements ILockStore {
             }
             throw ae;
         }
+    }
+
+    private DLMException removalError(final String lockId, final AerospikeException cause) {
+        return DLMException.builder()
+                .cause(cause)
+                .errorCode(ErrorCode.RETRIES_EXHAUSTED)
+                .message(String.format("Error removing lock in aerospike [id = %s]", lockId))
+                .build();
     }
 
     private DLMException connectionError(final String lockId, final RuntimeException cause) {
