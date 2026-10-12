@@ -172,4 +172,27 @@ class HBaseStoreTest {
         when(mockedConnection.getTable(any(TableName.class))).thenReturn(table);
         return HBaseStore.builder().connection(mockedConnection).tableName(TABLE).build();
     }
+
+    @Test
+    void writeWrapsIOExceptionAsConnectionError() throws IOException {
+        final DLMException exception = assertThrows(DLMException.class,
+                () -> failingStore().write(LOCK_ID, LockLevel.DC, FARM_ID, TTL, ACQUIRED_AT));
+
+        assertEquals(ErrorCode.CONNECTION_ERROR, exception.getErrorCode());
+    }
+
+    @Test
+    @SuppressWarnings("deprecation")
+    void deprecatedRemoveWrapsIOException() throws IOException {
+        final DLMException exception = assertThrows(DLMException.class,
+                () -> failingStore().remove(LOCK_ID, LockLevel.DC, FARM_ID));
+
+        assertEquals(ErrorCode.INTERNAL_ERROR, exception.getErrorCode());
+    }
+
+    private HBaseStore failingStore() throws IOException {
+        final Connection failingConnection = mock(Connection.class);
+        when(failingConnection.getTable(any(TableName.class))).thenThrow(new IOException("unreachable"));
+        return HBaseStore.builder().connection(failingConnection).tableName(TABLE).build();
+    }
 }

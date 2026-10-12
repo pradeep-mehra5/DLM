@@ -157,4 +157,36 @@ class AerospikeStoreTest {
         assertEquals(ErrorCode.RETRIES_EXHAUSTED, exception.getErrorCode());
         verify(client, times(5)).delete(any(WritePolicy.class), any(Key.class));
     }
+
+    @Test
+    @SuppressWarnings("deprecation")
+    void deprecatedWriteStampsCurrentTimeInModifiedAtBin() {
+        when(client.getWritePolicyDefault()).thenReturn(new WritePolicy());
+        final long before = System.currentTimeMillis();
+
+        store.write("lock", LockLevel.DC, "farm", Duration.ofSeconds(30));
+
+        final ArgumentCaptor<Bin> bins = ArgumentCaptor.forClass(Bin.class);
+        verify(client).put(any(WritePolicy.class), any(Key.class), bins.capture());
+        final long stamped = bins.getAllValues().stream()
+                .filter(bin -> bin.name.equals("farm##uat"))
+                .findFirst().orElseThrow()
+                .value.toLong();
+        assertTrue(stamped >= before && stamped <= System.currentTimeMillis());
+    }
+
+    @Test
+    void writeWrapsNonLockUnavailableFailureAsConnectionError() {
+        when(client.getWritePolicyDefault()).thenReturn(new WritePolicy());
+        org.mockito.Mockito.doThrow(new AerospikeException(ResultCode.TIMEOUT))
+                .when(client).put(any(WritePolicy.class), any(Key.class), any(Bin.class), any(Bin.class));
+        Thread.currentThread().interrupt(); // retry sleep is interrupted -> DLMException(INTERNAL_ERROR) from retry
+        try {
+            final DLMException exception = assertThrows(DLMException.class,
+                    () -> store.write("lock", LockLevel.DC, "farm", Duration.ofSeconds(30), ACQUIRED_AT));
+            assertEquals(ErrorCode.CONNECTION_ERROR, exception.getErrorCode());
+        } finally {
+            Thread.interrupted();
+        }
+    }
 }
